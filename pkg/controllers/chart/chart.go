@@ -59,21 +59,22 @@ var (
 )
 
 type Controller struct {
-	systemNamespace string
-	managedBy       string
-	helms           helmcontroller.HelmChartController
-	helmCache       helmcontroller.HelmChartCache
-	confs           helmcontroller.HelmChartConfigController
-	confCache       helmcontroller.HelmChartConfigCache
-	jobs            batchcontroller.JobController
-	jobCache        batchcontroller.JobCache
-	apply           apply.Apply
-	recorder        record.EventRecorder
-	apiServerPort   string
+	systemNamespace  string
+	managedBy        string
+	helms            helmcontroller.HelmChartController
+	helmCache        helmcontroller.HelmChartCache
+	confs            helmcontroller.HelmChartConfigController
+	confCache        helmcontroller.HelmChartConfigCache
+	jobs             batchcontroller.JobController
+	jobCache         batchcontroller.JobCache
+	apply            apply.Apply
+	recorder         record.EventRecorder
+	apiServerPort    string
+	apiServerAddress string
 }
 
 func Register(ctx context.Context,
-	systemNamespace, managedBy, apiServerPort string,
+	systemNamespace, managedBy, apiServerPort string, apiServerAddress string,
 	k8s kubernetes.Interface,
 	apply apply.Apply,
 	recorder record.EventRecorder,
@@ -89,16 +90,17 @@ func Register(ctx context.Context,
 	s corecontroller.SecretController) {
 
 	c := &Controller{
-		systemNamespace: systemNamespace,
-		managedBy:       managedBy,
-		helms:           helms,
-		helmCache:       helmCache,
-		confs:           confs,
-		confCache:       confCache,
-		jobs:            jobs,
-		jobCache:        jobCache,
-		recorder:        recorder,
-		apiServerPort:   apiServerPort,
+		systemNamespace:  systemNamespace,
+		managedBy:        managedBy,
+		helms:            helms,
+		helmCache:        helmCache,
+		confs:            confs,
+		confCache:        confCache,
+		jobs:             jobs,
+		jobCache:         jobCache,
+		recorder:         recorder,
+		apiServerPort:    apiServerPort,
+		apiServerAddress: apiServerAddress,
 	}
 
 	c.apply = apply.
@@ -318,7 +320,7 @@ func (c *Controller) getJobAndRelatedResources(chart *v1.HelmChart) (*batch.Job,
 	}
 
 	// get the default job and configmaps
-	job, valuesSecret, contentConfigMap := job(chart, c.apiServerPort)
+	job, valuesSecret, contentConfigMap := job(chart, c.apiServerPort, c.apiServerAddress)
 
 	// check if a HelmChartConfig is registered for this Helm chart
 	config, err := c.confCache.Get(chart.Namespace, chart.Name)
@@ -350,7 +352,7 @@ func (c *Controller) getJobAndRelatedResources(chart *v1.HelmChart) (*batch.Job,
 	}, nil
 }
 
-func job(chart *v1.HelmChart, apiServerPort string) (*batch.Job, *corev1.Secret, *corev1.ConfigMap) {
+func job(chart *v1.HelmChart, apiServerPort string, apiServerAddress string) (*batch.Job, *corev1.Secret, *corev1.ConfigMap) {
 	jobImage := strings.TrimSpace(chart.Spec.JobImage)
 	if jobImage == "" {
 		jobImage = DefaultJobImage
@@ -487,7 +489,7 @@ func job(chart *v1.HelmChart, apiServerPort string) (*batch.Job, *corev1.Secret,
 		job.Spec.Template.Spec.Containers[0].Env = append(job.Spec.Template.Spec.Containers[0].Env, []corev1.EnvVar{
 			{
 				Name:  "KUBERNETES_SERVICE_HOST",
-				Value: "127.0.0.1"},
+				Value: apiServerAddress},
 			{
 				Name:  "KUBERNETES_SERVICE_PORT",
 				Value: apiServerPort},

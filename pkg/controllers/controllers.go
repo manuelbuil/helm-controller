@@ -76,6 +76,7 @@ func Register(ctx context.Context, systemNamespace, controllerName string, cfg c
 		systemNamespace,
 		controllerName,
 		"6443",
+		"127.0.0.1",
 		appCtx.K8s,
 		appCtx.Apply,
 		recorder,
