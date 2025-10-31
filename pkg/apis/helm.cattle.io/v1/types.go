@@ -36,6 +36,8 @@ type HelmChartSpec struct {
 	Timeout         *metav1.Duration              `json:"timeout,omitempty"`
 	FailurePolicy   string                        `json:"failurePolicy,omitempty"`
 	AuthSecret      *corev1.LocalObjectReference  `json:"authSecret,omitempty"`
+	NodeSelector    map[string]string             `json:"nodeSelector,omitempty"`
+	Tolerations     []corev1.Toleration           `json:"tolerations,omitempty"`
 
 	AuthPassCredentials  bool                         `json:"authPassCredentials,omitempty"`
 	DockerRegistrySecret *corev1.LocalObjectReference `json:"dockerRegistrySecret,omitempty"`

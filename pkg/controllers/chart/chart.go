@@ -454,6 +454,14 @@ func job(chart *v1.HelmChart, apiServerPort string) (*batch.Job, *corev1.Secret,
 
 	job.Spec.Template.Spec.NodeSelector = make(map[string]string)
 	job.Spec.Template.Spec.NodeSelector[corev1.LabelOSStable] = "linux"
+	if len(chart.Spec.NodeSelector) > 0 {
+		for key, value := range chart.Spec.NodeSelector {
+			// We want to keep "linux" as the OS label for the job
+			if key != corev1.LabelOSStable {
+				job.Spec.Template.Spec.NodeSelector[key] = value
+			}
+		}
+	}
 
 	if chart.Spec.Bootstrap {
 		job.Spec.Template.Spec.NodeSelector[LabelNodeRolePrefix+LabelControlPlaneSuffix] = "true"
@@ -495,6 +503,8 @@ func job(chart *v1.HelmChart, apiServerPort string) (*batch.Job, *corev1.Secret,
 				Name:  "BOOTSTRAP",
 				Value: "true"},
 		}...)
+	} else if len(chart.Spec.Tolerations) > 0 {
+		job.Spec.Template.Spec.Tolerations = chart.Spec.Tolerations
 	}
 
 	setProxyEnv(job)
