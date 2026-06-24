@@ -132,6 +132,117 @@ type secretLister interface {
 	List(namespace string, opts metav1.ListOptions) (*corev1.SecretList, error)
 }
 
+// RegisterDependencies collects all external dependencies required by chart controller registration.
+// This avoids a large positional argument list and makes call sites explicit.
+type RegisterDependencies struct {
+	K8s         kubernetes.Interface
+	Apply       apply.Apply
+	Recorder    record.EventRecorder
+	Helms       helmcontroller.HelmChartController
+	HelmCache   helmcontroller.HelmChartCache
+	Confs       helmcontroller.HelmChartConfigController
+	ConfCache   helmcontroller.HelmChartConfigCache
+	Jobs        batchcontroller.JobController
+	JobCache    batchcontroller.JobCache
+	CRBs        rbaccontroller.ClusterRoleBindingController
+	SAs         corecontroller.ServiceAccountController
+	ConfigMap   corecontroller.ConfigMapController
+	Secrets     corecontroller.SecretController
+	SecretCache corecontroller.SecretCache
+}
+
+// RegisterOptions configures chart controller behavior at registration time.
+type RegisterOptions struct {
+	ManagedBy        string
+	JobClusterRole   string
+	APIServerPort    string
+	DefaultJobImage  string
+	JobTolerations   []corev1.Toleration
+	EnforcePodLimits bool
+}
+
+// RegisterWithOptions registers the chart controller with explicit dependencies and options.
+func RegisterWithOptions(ctx context.Context, systemNamespace string, deps RegisterDependencies, opts RegisterOptions) {
+	// Apply runtime options before registering handlers so reconciliation behavior is consistent.
+	if opts.DefaultJobImage != "" {
+		DefaultJobImage = opts.DefaultJobImage
+	}
+	JobTolerations = opts.JobTolerations
+	EnforcePodLimits = opts.EnforcePodLimits
+
+	if opts.ManagedBy == "" {
+		opts.ManagedBy = "helm-controller"
+	}
+	if opts.JobClusterRole == "" {
+		opts.JobClusterRole = "cluster-admin"
+	}
+	if opts.APIServerPort == "" {
+		opts.APIServerPort = "6443"
+	}
+
+	c := &Controller{
+		systemNamespace: systemNamespace,
+		jobClusterRole:  opts.JobClusterRole,
+		managedBy:       opts.ManagedBy,
+		helms:           deps.Helms,
+		helmCache:       deps.HelmCache,
+		confs:           deps.Confs,
+		confCache:       deps.ConfCache,
+		jobs:            deps.Jobs,
+		jobCache:        deps.JobCache,
+		configMaps:      deps.ConfigMap,
+		secrets:         deps.Secrets,
+		secretCache:     deps.SecretCache,
+		recorder:        deps.Recorder,
+		apiServerPort:   opts.APIServerPort,
+	}
+
+	c.apply = deps.Apply.
+		WithCacheTypes(deps.Helms, deps.Confs, deps.Jobs, deps.CRBs, deps.SAs, deps.ConfigMap, deps.Secrets).
+		WithStrictCaching().
+		WithReconciler(deps.Jobs.GroupVersionKind(), c.reconcileJob)
+
+	deps.HelmCache.AddIndexer(chartBySecretIndex, chartBySecret)
+	deps.ConfCache.AddIndexer(chartConfigBySecretIndex, chartConfigBySecret)
+
+	relatedresource.Watch(ctx, "resolve-helm-chart-from-helm-chart-config", c.resolveHelmChartFromHelmChartConfig, deps.Helms, deps.Confs)
+	relatedresource.Watch(ctx, "resolve-helm-chart-from-secret", c.resolveHelmChartFromSecret, deps.Helms, deps.Secrets)
+	relatedresource.Watch(ctx, "resolve-helm-chart-config-from-secret", c.resolveHelmChartConfigFromSecret, deps.Confs, deps.Secrets)
+
+	// Why do we need to add the managedBy string to the generatingHandlerName?
+	//
+	// By default, generating handlers use the name of the controller as the set ID for the wrangler.apply operation
+	// Therefore, if multiple iterations of the helm-controller are using the same set ID, they will try to overwrite each other's
+	// resources since each controller will detect the other's set as resources that need to be cleaned up to apply the new set
+	//
+	// To resolve this, we simply prefix the provided managedBy string to the generatingHandler controller's name only to ensure that the
+	// set ID specified will only target this particular controller
+	generatingHandlerName := fmt.Sprintf("%s-chart-registration", opts.ManagedBy)
+	helmcontroller.RegisterHelmChartGeneratingHandler(ctx, deps.Helms, c.apply, "", generatingHandlerName, c.OnChange, &generic.GeneratingHandlerOptions{
+		AllowClusterScoped: true,
+	})
+
+	remove.RegisterScopedOnRemoveHandler(ctx, deps.Helms, "on-helm-chart-remove",
+		func(key string, obj runtime.Object) (bool, error) {
+			if obj == nil {
+				return false, nil
+			}
+			helmChart, ok := obj.(*v1.HelmChart)
+			if !ok {
+				return false, nil
+			}
+			return c.shouldManage(helmChart)
+		},
+		generic.FromObjectHandlerToHandler(generic.ObjectHandler[*v1.HelmChart](c.OnRemove)),
+	)
+
+	relatedresource.Watch(ctx, "resolve-helm-chart-owned-resources",
+		relatedresource.OwnerResolver(true, v1.SchemeGroupVersion.String(), "HelmChart"),
+		deps.Helms,
+		deps.Jobs, deps.CRBs, deps.SAs, deps.ConfigMap,
+	)
+}
+
 func Register(
 	ctx context.Context,
 	systemNamespace,
@@ -152,67 +263,29 @@ func Register(
 	cm corecontroller.ConfigMapController,
 	s corecontroller.SecretController,
 	sCache corecontroller.SecretCache) {
-	c := &Controller{
-		systemNamespace: systemNamespace,
-		jobClusterRole:  jobClusterRole,
-		managedBy:       managedBy,
-		helms:           helms,
-		helmCache:       helmCache,
-		confs:           confs,
-		confCache:       confCache,
-		jobs:            jobs,
-		jobCache:        jobCache,
-		configMaps:      cm,
-		secrets:         s,
-		secretCache:     sCache,
-		recorder:        recorder,
-		apiServerPort:   apiServerPort,
-	}
-
-	c.apply = apply.
-		WithCacheTypes(helms, confs, jobs, crbs, sas, cm, s).
-		WithStrictCaching().
-		WithReconciler(jobs.GroupVersionKind(), c.reconcileJob)
-
-	helmCache.AddIndexer(chartBySecretIndex, chartBySecret)
-	confCache.AddIndexer(chartConfigBySecretIndex, chartConfigBySecret)
-
-	relatedresource.Watch(ctx, "resolve-helm-chart-from-helm-chart-config", c.resolveHelmChartFromHelmChartConfig, helms, confs)
-	relatedresource.Watch(ctx, "resolve-helm-chart-from-secret", c.resolveHelmChartFromSecret, helms, s)
-	relatedresource.Watch(ctx, "resolve-helm-chart-config-from-secret", c.resolveHelmChartConfigFromSecret, confs, s)
-
-	// Why do we need to add the managedBy string to the generatingHandlerName?
-	//
-	// By default, generating handlers use the name of the controller as the set ID for the wrangler.apply operation
-	// Therefore, if multiple iterations of the helm-controller are using the same set ID, they will try to overwrite each other's
-	// resources since each controller will detect the other's set as resources that need to be cleaned up to apply the new set
-	//
-	// To resolve this, we simply prefix the provided managedBy string to the generatingHandler controller's name only to ensure that the
-	// set ID specified will only target this particular controller
-	generatingHandlerName := fmt.Sprintf("%s-chart-registration", managedBy)
-	helmcontroller.RegisterHelmChartGeneratingHandler(ctx, helms, c.apply, "", generatingHandlerName, c.OnChange, &generic.GeneratingHandlerOptions{
-		AllowClusterScoped: true,
+	RegisterWithOptions(ctx, systemNamespace, RegisterDependencies{
+		K8s:         k8s,
+		Apply:       apply,
+		Recorder:    recorder,
+		Helms:       helms,
+		HelmCache:   helmCache,
+		Confs:       confs,
+		ConfCache:   confCache,
+		Jobs:        jobs,
+		JobCache:    jobCache,
+		CRBs:        crbs,
+		SAs:         sas,
+		ConfigMap:   cm,
+		Secrets:     s,
+		SecretCache: sCache,
+	}, RegisterOptions{
+		ManagedBy:        managedBy,
+		JobClusterRole:   jobClusterRole,
+		APIServerPort:    apiServerPort,
+		DefaultJobImage:  DefaultJobImage,
+		JobTolerations:   JobTolerations,
+		EnforcePodLimits: EnforcePodLimits,
 	})
-
-	remove.RegisterScopedOnRemoveHandler(ctx, helms, "on-helm-chart-remove",
-		func(key string, obj runtime.Object) (bool, error) {
-			if obj == nil {
-				return false, nil
-			}
-			helmChart, ok := obj.(*v1.HelmChart)
-			if !ok {
-				return false, nil
-			}
-			return c.shouldManage(helmChart)
-		},
-		generic.FromObjectHandlerToHandler(generic.ObjectHandler[*v1.HelmChart](c.OnRemove)),
-	)
-
-	relatedresource.Watch(ctx, "resolve-helm-chart-owned-resources",
-		relatedresource.OwnerResolver(true, v1.SchemeGroupVersion.String(), "HelmChart"),
-		helms,
-		jobs, crbs, sas, cm,
-	)
 }
 
 // reconcileJob triggers recreation of the Job if the pod template spec changes.

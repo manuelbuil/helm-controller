@@ -78,33 +78,29 @@ func Register(ctx context.Context, systemNamespace, controllerName string, cfg c
 		Host:      opts.NodeName,
 	})
 
-	// apply custom DefaultJobImage option to Helm before starting charts controller
-	if opts.DefaultJobImage != "" {
-		chart.DefaultJobImage = opts.DefaultJobImage
-	}
-	chart.EnforcePodLimits = opts.EnforcePodLimits
-	chart.JobTolerations = opts.JobTolerations
-
-	chart.Register(ctx,
-		systemNamespace,
-		controllerName,
-		opts.JobClusterRole,
-		"6443",
-		appCtx.K8s,
-		appCtx.Apply,
-		recorder,
-		appCtx.HelmChart(),
-		appCtx.HelmChart().Cache(),
-		appCtx.HelmChartConfig(),
-		appCtx.HelmChartConfig().Cache(),
-		appCtx.Batch.Job(),
-		appCtx.Batch.Job().Cache(),
-		appCtx.RBAC.ClusterRoleBinding(),
-		appCtx.Core.ServiceAccount(),
-		appCtx.Core.ConfigMap(),
-		appCtx.Core.Secret(),
-		appCtx.Core.Secret().Cache(),
-	)
+	chart.RegisterWithOptions(ctx, systemNamespace, chart.RegisterDependencies{
+		K8s:         appCtx.K8s,
+		Apply:       appCtx.Apply,
+		Recorder:    recorder,
+		Helms:       appCtx.HelmChart(),
+		HelmCache:   appCtx.HelmChart().Cache(),
+		Confs:       appCtx.HelmChartConfig(),
+		ConfCache:   appCtx.HelmChartConfig().Cache(),
+		Jobs:        appCtx.Batch.Job(),
+		JobCache:    appCtx.Batch.Job().Cache(),
+		CRBs:        appCtx.RBAC.ClusterRoleBinding(),
+		SAs:         appCtx.Core.ServiceAccount(),
+		ConfigMap:   appCtx.Core.ConfigMap(),
+		Secrets:     appCtx.Core.Secret(),
+		SecretCache: appCtx.Core.Secret().Cache(),
+	}, chart.RegisterOptions{
+		ManagedBy:        controllerName,
+		JobClusterRole:   opts.JobClusterRole,
+		APIServerPort:    "6443",
+		DefaultJobImage:  opts.DefaultJobImage,
+		JobTolerations:   opts.JobTolerations,
+		EnforcePodLimits: opts.EnforcePodLimits,
+	})
 
 	logger := klog.FromContext(ctx)
 	logger.Info("Starting helm controller", "threads", opts.Threadiness)
